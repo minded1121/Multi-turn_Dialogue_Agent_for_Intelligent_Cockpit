@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>AI 智能对话助手</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.1/socket.io.js"></script>
+    <style>
+        body { font-family: 'PingFang SC', sans-serif; background: #e0e5ec; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+        #chat-container { width: 450px; background: #ffffff; border-radius: 16px; box-shadow: 0 10px 30px rgba(0,0,0,0.1); display: flex; flex-direction: column; height: 700px; overflow: hidden; }
+        #chat-header { background: #000000; color: white; padding: 20px; text-align: center; font-size: 18px; font-weight: bold; }
+        #chat-box { flex: 1; padding: 20px; overflow-y: auto; display: flex; flex-direction: column; gap: 15px; background: #f8f9fa; }
+        .msg { max-width: 80%; padding: 12px 16px; border-radius: 12px; font-size: 15px; line-height: 1.5; word-wrap: break-word; }
+        .msg.user { background: #007bff; color: white; align-self: flex-end; border-bottom-right-radius: 4px; }
+        .msg.bot { background: #ffffff; color: #333; align-self: flex-start; border-bottom-left-radius: 4px; border: 1px solid #ebeeef; }
+        .msg.sys { background: transparent; color: #999; align-self: center; font-size: 12px; border: none; padding: 5px;}
+        #input-area { display: flex; padding: 15px; background: #ffffff; border-top: 1px solid #f1f1f1; }
+        #input-area input { flex: 1; padding: 12px 15px; border: 1px solid #e0e0e0; border-radius: 8px; outline: none; font-size: 15px; }
+        #input-area input:focus { border-color: #007bff; }
+        #input-area button { padding: 12px 20px; margin-left: 10px; background: #000000; color: white; border: none; border-radius: 8px; cursor: pointer; font-size: 15px; font-weight: bold; }
+        #status-dot { display: inline-block; width: 8px; height: 8px; background: red; border-radius: 50%; margin-right: 8px; }
+    </style>
+</head>
+<body>
+    <div id="chat-container">
+        <div id="chat-header">
+            <span id="status-dot"></span>智能对话助手
+        </div>
+        <div id="chat-box">
+            <div class="msg bot">你好！我是你的智能对话助手。服务器正在连接中...</div>
+        </div>
+        <div id="input-area">
+            <input type="text" id="user-input" placeholder="例如: 播放周杰伦的七里香..." onkeypress="handleEnter(event)">
+            <button onclick="sendMessage()">发送</button>
+        </div>
+    </div>
+
+    <script>
+        // 1. 建立 Socket.IO 连接
+        const socket = io("http://127.0.0.1:8080");
+        const senderId = "web_user_001";
+        
+        let currentBotMsgDiv = null; // 用于存储当前正在打字的流式气泡
+
+        // 监听连接成功事件
+        socket.on('connect', function() {
+            document.getElementById('status-dot').style.background = '#00ff00';
+            appendMessage("系统：服务器连接成功！", "sys");
+        });
+
+        // 监听连接断开事件
+        socket.on('disconnect', function() {
+            document.getElementById('status-dot').style.background = 'red';
+            appendMessage("系统：与服务器断开连接...", "sys");
+        });
+
+        // 2. 监听后端返回的 'request_nlu' 事件（核心逻辑）
+        socket.on('request_nlu', function(responseStr) {
+            removeLoading();
+            const data = JSON.parse(responseStr);
+            console.log("后端返回:", data);
+
+            // 处理流式闲聊 (百科聊天)
+            if (data.func === "CHAT") {
+                if (data.status === 0) {
+                    // status=0: 准备开始回答，创建一个空的气泡
+                    currentBotMsgDiv = createBotMessageDiv();
+                } else if (data.status === 1) {
+                    // status=1: 流式传输中，往气泡里追加文字
+                    if (!currentBotMsgDiv) currentBotMsgDiv = createBotMessageDiv();
+                    currentBotMsgDiv.textContent += data.frame;
+                    scrollToBottom();
+                } else if (data.status === 2) {
+                    // status=2: 回答结束
+                    currentBotMsgDiv = null; 
+                }
+            } 
+            // 处理技能意图 (如播放音乐、导航) 或 拒识
+            else {
+                let text = "";
+                if (data.func === "REJECT") {
+                    text = "对不起，我暂时还听不懂这个指令。";
+                } else {
+                    // 技能命中，显示结构化信息
+                    text = `【执行技能】: ${data.intent}\n` + 
+                           `【执行函数】: ${data.function}\n` + 
+                           `【提取槽位】: ${JSON.stringify(data.slots)}`;
+                }
+                const msgDiv = createBotMessageDiv();
+                msgDiv.innerText = text; // 使用 innerText 保留换行
+                currentBotMsgDiv = null;
+            }
+        });
+
+        // 3. 发送消息到后端
+        function sendMessage() {
+            const inputEl = document.getElementById("user-input");
+            const text = inputEl.value.trim();
+            if (!text) return;
+
+            appendMessage(text, "user");
+            inputEl.value = "";
+            appendMessage("正在思考中...", "sys");
+
+            // 通过 socket.emit 发送 JSON 字符串，事件名必须是 request_nlu
+            const reqData = {
+                query: text,
+                sender_id: senderId,
+                enable_dm: true
+            };
+            socket.emit('request_nlu', JSON.stringify(reqData));
+        }
+
+        // --- 以下为 UI 辅助函数 ---
+        function appendMessage(text, sender) {
+            const box = document.getElementById("chat-box");
+            const msgDiv = document.createElement("div");
+            msgDiv.className = "msg " + sender;
+            if (sender === 'sys') msgDiv.id = 'loading-msg';
+            msgDiv.textContent = text;
+            box.appendChild(msgDiv);
+            scrollToBottom();
+        }
+
+        function createBotMessageDiv() {
+            const box = document.getElementById("chat-box");
+            const msgDiv = document.createElement("div");
+            msgDiv.className = "msg bot";
+            box.appendChild(msgDiv);
+            scrollToBottom();
+            return msgDiv;
+        }
+
+        function removeLoading() {
+            const loading = document.getElementById('loading-msg');
+            if (loading) loading.remove();
+        }
+
+        function scrollToBottom() {
+            const box = document.getElementById("chat-box");
+            box.scrollTop = box.scrollHeight;
+        }
+
+        function handleEnter(e) {
+            if (e.key === "Enter") sendMessage();
+        }
+    </script>
+</body>
+</html>
